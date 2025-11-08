@@ -1,0 +1,149 @@
+---
+- name: Linux System Update + Discord Reporting
+  hosts: all
+  become: yes
+  gather_facts: yes
+
+  vars:
+    # Kürze die Liste der Paketzeilen für Discord (max lines in embed)
+    max_pkg_lines: 15
+
+  tasks:
+    - name: Stelle sicher, dass die discord_webhook Variable vorhanden ist
+      assert:
+        that:
+          - discord_webhook is defined
+        fail_msg: "discord_webhook ist nicht gesetzt. Setze die Webhook-URL in Inventory/Host-Variablen oder als Credential."
+
+    - name: Aktualisiere APT Cache (Debian/Ubuntu)
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+      register: apt_update_result
+      tags: update
+
+    - name: Simuliere welche Pakete geupdated würden (APT simuliert)
+      command: apt-get -s upgrade
+      args:
+        warn: false
+      register: simulate_upgrade
+      changed_when: false
+      when: ansible_os_family == "Debian"
+
+    - name: Führe das Upgrade aus (APT)
+      apt:
+        upgrade: dist
+        autoremove: yes
+      when: ansible_os_family == "Debian"
+      register: upgrade_result
+
+    - name: Update für RHEL-family (dnf/yum)
+      block:
+        - name: Simulate DNF upgrade
+          command: dnf check-update || true
+          register: simulate_dnf
+          changed_when: false
+
+        - name: Run dnf upgrade
+          dnf:
+            name: "*"
+            state: latest
+          register: upgrade_result
+      when: ansible_os_family == "RedHat"
+
+    - name: Prüfen ob Reboot erforderlich (Debian/Ubuntu)
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_file
+      tags: reboot_check
+
+    - name: Neustart wenn nötig
+      reboot:
+        reboot_timeout: 600
+      when: reboot_file.stat.exists
+      register: reboot_action
+
+    # --- Build message details ---
+    - name: Baue kurze Liste der zu updatenden Pakete (APT Simulation)
+      set_fact:
+        pkg_lines: |
+          {{ simulate_upgrade.stdout_lines | select("match","^Inst ") | list | map("regex_replace","^Inst ","") | list }}
+      when: ansible_os_family == "Debian" and simulate_upgrade is defined
+
+    - name: Baue kurze Liste der DNF-Updates (falls vorhanden)
+      set_fact:
+        pkg_lines: "{{ simulate_dnf.stdout_lines | default([]) }}"
+      when: ansible_os_family == "RedHat" and simulate_dnf is defined
+
+    - name: Kürze Paketliste auf {{ max_pkg_lines }} Einträge (falls vorhanden)
+      set_fact:
+        pkg_lines_short: "{{ pkg_lines[:max_pkg_lines] | default([]) }}"
+
+    - name: Baue Discord Payload
+      set_fact:
+        discord_payload:
+          content: ""
+          embeds:
+            - title: "System-Updatebericht: {{ inventory_hostname }}"
+              description: |
+                **Status:** {% if upgrade_result is defined and upgrade_result.changed %}✅ Updates installiert{% elif upgrade_result is defined %}ℹ️ Keine Updates nötig{% else %}⚠️ Kein Upgrade-Ergebnis{% endif %}
+                **Reboot erforderlich:** {% if reboot_file.stat.exists %}Ja{% else %}Nein{% endif %}
+              fields:
+                - name: "Host"
+                  value: "{{ inventory_hostname }}"
+                  inline: true
+                - name: "OS"
+                  value: "{{ ansible_distribution }} {{ ansible_distribution_version }}"
+                  inline: true
+                - name: "Zusammenfassung"
+                  value: >
+                    {% if upgrade_result is defined %}
+                      changed: {{ upgrade_result.changed | default(false) }}
+                      failed: {{ upgrade_result.failed | default(false) }}
+                    {% else %}
+                      kein Ergebnis
+                    {% endif %}
+              timestamp: "{{ ansible_date_time.iso8601 }}"
+      no_log: false
+
+    - name: Anhängen der Paketliste (falls vorhanden) an Embed (als Feld)
+      set_fact:
+        discord_payload: >-
+          {{
+            discord_payload.update(
+              {
+                "embeds": [
+                  discord_payload.embeds[0] | combine({
+                    "fields": (discord_payload.embeds[0].fields + [
+                      {
+                        "name": "Beabsichtigte Paket-Updates (Beispiel)",
+                        "value": (pkg_lines_short | join("\n")) | default("Keine Paketliste verfügbar"),
+                        "inline": false
+                      }
+                    ])
+                  })
+                ]
+              }
+            ) or discord_payload
+          }}
+      when: pkg_lines_short is defined
+
+    - name: Sende Nachricht an Discord Webhook
+      uri:
+        url: "{{ discord_webhook }}"
+        method: POST
+        headers:
+          Content-Type: "application/json"
+        body: "{{ discord_payload | to_json }}"
+        status_code: [200,204]
+        body_format: json
+      register: discord_result
+      failed_when: discord_result.status not in [200,204]
+      tags: notify
+
+    - name: Debug - Discord Response
+      debug:
+        var: discord_result
+      when: discord_result is defined and discord_result.status is defined
+      # optional: schalte no_log: true falls du das nicht in Logs willst
