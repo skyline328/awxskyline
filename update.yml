@@ -1,0 +1,26 @@
+---
+- name: Linux System Update
+  hosts: all
+  become: yes
+
+  tasks:
+    - name: Update apt Paketindex
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+      when: ansible_os_family == "Debian"
+
+    - name: Upgrade packages
+      apt:
+        upgrade: dist
+        autoremove: yes
+      when: ansible_os_family == "Debian"
+
+    - name: Check reboot required
+      stat:
+        path: /var/run/reboot-required
+      register: reboot_required
+
+    - name: Reboot if required
+      reboot:
+      when: reboot_required.stat.exists
