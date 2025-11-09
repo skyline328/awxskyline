@@ -10,17 +10,17 @@
     retry_delay: 2
 
   tasks:
-    - name: Prüfe ob Mailcow-Pfad existiert
+    - name: "Prüfe ob Mailcow-Pfad existiert"
       ansible.builtin.stat:
         path: "{{ mailcow_path }}"
       register: mailcow_dir
 
-    - name: Abbruch wenn Mailcow-Pfad nicht existiert
+    - name: "Abbruch wenn Mailcow-Pfad nicht existiert"
       ansible.builtin.fail:
         msg: "Pfad {{ mailcow_path }} existiert nicht auf {{ inventory_hostname }} — bitte prüfen."
       when: not mailcow_dir.stat.exists
 
-    - name: Führe update.sh bis zu {{ max_update_attempts }} mal aus (falls Script sich selbst updated)
+    - name: "Führe update.sh bis zu {{ max_update_attempts }} mal aus (falls Script sich selbst updated)"
       ansible.builtin.shell: "./update.sh"
       args:
         chdir: "{{ mailcow_path }}"
@@ -34,7 +34,7 @@
         and mailcow_update.rc == 0
       tags: mailcow-update
 
-    - name: Zeige kurzes Ergebnis in den Logs
+    - name: "Zeige kurzes Ergebnis in den Logs"
       ansible.builtin.debug:
         msg: |
           Host: {{ inventory_hostname }}
@@ -42,7 +42,7 @@
           Letzte stdout-Zeilen:
           {{ mailcow_update.stdout | default('keine Ausgabe') | regex_replace('(?m)^', '    ') }}
 
-    - name: Optional: prüfe Docker-Container Status (Info)
+    - name: "Optional: prüfe Docker-Container Status (Info)"
       ansible.builtin.shell: "docker ps --format '{{'{{'}}.Names{{'}}'}} {{'{{'}}.Status{{'}}'}}' | sed -n '1,50p'"
       args:
         warn: false
@@ -51,7 +51,7 @@
       changed_when: false
       when: mailcow_update.rc == 0
 
-    - name: Docker-Status (kurz) ausgeben
+    - name: "Docker-Status (kurz) ausgeben"
       ansible.builtin.debug:
         var: docker_ps.stdout_lines
       when: docker_ps is defined
