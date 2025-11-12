@@ -1,11 +1,11 @@
 ---
-- name: "System-Updates durchführen (Debian/RedHat) und Ergebnis pro Host sammeln"
+- name: "System-Updates durchführen (Debian/RedHat) und Host-Ergebnisse sammeln"
   hosts: all
   become: yes
   gather_facts: yes
 
   vars:
-    max_pkg_lines: 10
+    max_pkg_preview: 8
 
   tasks:
     - name: "APT: Cache aktualisieren (Debian/Ubuntu)"
@@ -24,14 +24,14 @@
       register: upgrade_result
       failed_when: false
 
-    - name: "DNF: check-update (RedHat-Family) - nur prüfen"
+    - name: "DNF: check-update (RedHat) - nur prüfen"
       command: dnf check-update
       when: ansible_os_family == "RedHat"
       register: simulate_dnf
       failed_when: false
       changed_when: false
 
-    - name: "DNF: Upgrade durchführen (RedHat-Family)"
+    - name: "DNF: Upgrade durchführen (RedHat)"
       dnf:
         name: "*"
         state: latest
@@ -45,7 +45,7 @@
       register: reboot_file
       failed_when: false
 
-    - name: "Fasse Host-Ergebnis zusammen (Fact setzen)"
+    - name: "Setze Host-Zusammenfassung als Fact"
       set_fact:
         host_update_summary:
           host: "{{ inventory_hostname }}"
@@ -55,19 +55,19 @@
           reboot_required: "{{ reboot_file.stat.exists | default(false) }}"
           pkg_preview: >-
             {% if ansible_os_family == 'Debian' and apt_update_result is defined %}
-              {{ (apt_update_result.stdout_lines | default([]))[:max_pkg_lines] | join(', ') }}
+              {{ (apt_update_result.stdout_lines | default([]))[:max_pkg_preview] | join(', ') }}
             {% elif ansible_os_family == 'RedHat' and simulate_dnf is defined %}
-              {{ (simulate_dnf.stdout_lines | default([]))[:max_pkg_lines] | join(', ') }}
+              {{ (simulate_dnf.stdout_lines | default([]))[:max_pkg_preview] | join(', ') }}
             {% else %}
               keine Paketinfo
             {% endif %}
       no_log: false
 
-    - name: "Kurze Debug-Ausgabe Host-Zusammenfassung (nur im Joblog)"
+    - name: "Debug: Host-Zusammenfassung (nur Joblog)"
       debug:
         var: host_update_summary
 
-- name: "Ergebnisse sammeln und als eine Nachricht an Discord senden (run_once)"
+- name: "Sammle nur Hosts mit Änderungen und sende ein zusammenfassendes Discord-Message (run_once)"
   hosts: localhost
   gather_facts: no
   run_once: true
@@ -79,35 +79,37 @@
           - discord_webhook is defined
         fail_msg: "discord_webhook ist nicht gesetzt. Lege die Webhook-URL in Inventory-Variablen oder als extra var fest."
 
-    - name: "Baue Liste der Host-Zusammenfassungen"
+    - name: "Baue Liste der Hosts mit Änderungen"
       set_fact:
-        summary_lines: "{{ summary_lines | default([]) + [ single_line ] }}"
+        changed_hosts: "{{ changed_hosts | default([]) + [ single_line ] }}"
       vars:
         single_line: >-
-          **{{ hostvars[item].host_update_summary.host }}** — {{ hostvars[item].host_update_summary.os }} — {% if hostvars[item].host_update_summary.failed %}❌ Fehler{% elif hostvars[item].host_update_summary.changed %}✅ Updates installiert{% else %}ℹ️ Keine Updates{% endif %}{% if hostvars[item].host_update_summary.reboot_required %} — 🔁 Reboot erforderlich{% endif %} {% if hostvars[item].host_update_summary.pkg_preview is defined %}\nPackages: {{ hostvars[item].host_update_summary.pkg_preview }}{% endif %}
+          **{{ hostvars[item].host_update_summary.host }}** — {{ hostvars[item].host_update_summary.os }}
+          {% if hostvars[item].host_update_summary.reboot_required %} — 🔁 Reboot erforderlich{% endif %}
+          {% if hostvars[item].host_update_summary.pkg_preview is defined and hostvars[item].host_update_summary.pkg_preview != 'keine Paketinfo' %}\nPackages: {{ hostvars[item].host_update_summary.pkg_preview }}{% endif %}
       loop: "{{ groups['all'] }}"
       loop_control:
         label: "{{ item }}"
-      when: hostvars[item].host_update_summary is defined
+      when: hostvars[item].host_update_summary is defined and hostvars[item].host_update_summary.changed
 
-    - name: "Fallback wenn keine Hosts gefunden wurden"
+    - name: "Wenn keine geänderten Hosts, setze Hinweis"
       set_fact:
-        summary_lines: ["Keine Hosts im Inventory gefunden oder keine Ergebnisse gesammelt."]
-      when: summary_lines is not defined or summary_lines | length == 0
+        changed_hosts: ["Keine Änderungen auf den Hosts festgestellt."]
+      when: changed_hosts is not defined or changed_hosts | length == 0
 
-    - name: "Baue Discord-Payload"
+    - name: "Baue Discord-Payload (nur eine Nachricht)"
       set_fact:
         discord_payload:
-          content: "Täglicher Update-Summary ({{ lookup('pipe','date +%F') }})"
+          content: "Update Summary ({{ lookup('pipe','date +%F') }})"
           embeds:
-            - title: "Täglicher Update-Summary"
-              description: "Kurzüberblick der letzten Updates"
+            - title: "Update Summary"
+              description: "Nur Hosts mit Updates (falls vorhanden)"
               fields:
-                - name: "Anzahl geprüfter Hosts"
-                  value: "{{ summary_lines | length }}"
+                - name: "Anzahl geänderter Hosts"
+                  value: "{{ (changed_hosts | length) if (changed_hosts is defined and (changed_hosts | first) != 'Keine Änderungen auf den Hosts festgestellt.') else 0 }}"
                   inline: true
                 - name: "Details"
-                  value: "{{ summary_lines | join('\\n') }}"
+                  value: "{{ changed_hosts | join('\\n') }}"
                   inline: false
               timestamp: "{{ lookup('pipe','date --iso-8601=seconds') }}"
 
@@ -123,6 +125,6 @@
       register: discord_result
       failed_when: discord_result.status not in [200,204]
 
-    - name: "Debug: Discord Response"
+    - name: "Debug: Discord Ergebnis"
       debug:
         var: discord_result
